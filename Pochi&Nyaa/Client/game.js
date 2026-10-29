@@ -1,8 +1,13 @@
 import {khung} from './draw.js'
-import {block, getBlockParticleColor, getScoreAnchor, sidePanel} from './draw.js'
+import {block, drawLossZoneX, getBlockParticleColor, getScoreAnchor, sidePanel} from './draw.js'
 import {essen} from './essentials.js'
 let lastTime = 0
-let blocks = Array.from({length:essen.ratioh},()=>Array(essen.ratiow).fill(0))
+const hiddenTopRows = 2 // Extra storage above the visible frame for top-out overflow.
+let blocks = Array.from({length:essen.ratioh + hiddenTopRows},()=>Array(essen.ratiow).fill(0))
+let triggerExpiresAtTurn = Array.from({length:blocks.length},()=>Array(essen.ratiow).fill(null))
+let placementTurn = 0
+let pendingIncomingGarbage = 0
+let garbageColumnCursor = 0
 let key = {a:false,d:false,s:false,ArrowUp:false,ArrowLeft:false}
 let activePair = null
 let pairMotion = null
@@ -28,6 +33,8 @@ const blockBlastSound = new Audio(new URL('./sounds/blast2.MP3', import.meta.url
 blockBlastSound.preload = 'auto'
 
 const colorCount = 4
+const garbageBlockCode = colorCount * 2 + 1
+const triggerGarbageTurnLimit = 4 // Number of later pair placements before an unused trigger expires.
 const previewPairCount = 2
 const pairMotionDuration = 64
 const horizontalDelay = 200
@@ -35,7 +42,7 @@ const horizontalRepeat = 70
 const spawnDelay = 350
 const normalFallCellsPerSecond = 2
 const fastFallCellsPerSecond = 35
-const gravityFallCellsPerSecond = 30
+const gravityFallCellsPerSecond = 50
 const gravityAnimationMinDuration = 20 // Keep fast falls visible for at least one frame.
 const landingBounceDuration = 300
 const landingBounceStrength = 0.35
@@ -100,7 +107,7 @@ function spawnScoreParticle(row, col, type, timestamp=performance.now()) {
     const cellW = essen.khungw / essen.ratiow
     const cellH = essen.khungh / essen.ratioh
     const centerX = essen.boardX + (col + 0.5) * cellW
-    const centerY = essen.boardY + (row + 0.5) * cellH
+    const centerY = essen.boardY + (row - hiddenTopRows + 0.5) * cellH
     const color = getBlockParticleColor(type)
 
     scoreParticles.push({
@@ -234,7 +241,7 @@ export function spawnPair(colors) {
     const centerCol = Math.floor(essen.ratiow / 2)
     const pair = {
         col:centerCol,
-        y:cellH,
+        y:-(hiddenTopRows + 0.5) * cellH,
         colors:pairColorCopy,
         offset:{row:-1,col:0},
         trigger:false,
@@ -258,7 +265,23 @@ export function spawnPair(colors) {
 export function getGameSnapshot() {
     const cellH = essen.khungh / essen.ratioh
     return {
+        schemaVersion:3,
         board:blocks.map(row => [...row]),
+        boardLayout:{visibleRows:essen.ratioh,hiddenTopRows},
+        boardEncoding:{
+            empty:0,
+            normalColorMin:1,
+            normalColorMax:colorCount,
+            triggerMin:colorCount + 1,
+            triggerMax:colorCount * 2,
+            garbage:garbageBlockCode
+        },
+        placementTurn,
+        triggerTurnsRemaining:blocks.map((row, rowIndex) => row.map((cell, colIndex) =>
+            isTriggerBlockCode(cell) ? getTriggerTurnsRemaining(rowIndex, colIndex) : null
+        )),
+        pendingIncomingGarbage,
+        garbageColumnCursor,
         score,
         nextPairs:getUpcomingPairs(),
         activePair:activePair ? {
@@ -278,6 +301,32 @@ export function getGameSnapshot() {
 
 function blockCode(color, trigger=false) {
     return trigger ? color + colorCount : color
+}
+
+function isTriggerBlockCode(cellCode) {
+    return cellCode > colorCount && cellCode <= colorCount * 2
+}
+
+function advancePlacementTurn() {
+    placementTurn += 1
+    for (let row = 0; row < blocks.length; row++) {
+        for (let col = 0; col < blocks[row].length; col++) {
+            if (!isTriggerBlockCode(blocks[row][col])) continue
+
+            const expiresAtTurn = triggerExpiresAtTurn[row][col]
+            if (!Number.isInteger(expiresAtTurn) || placementTurn >= expiresAtTurn) {
+                blocks[row][col] = garbageBlockCode
+                triggerExpiresAtTurn[row][col] = null
+            }
+        }
+    }
+}
+
+function getTriggerTurnsRemaining(row, col) {
+    if (!isTriggerBlockCode(blocks[row][col])) return null
+    const expiresAtTurn = triggerExpiresAtTurn[row][col]
+    if (!Number.isInteger(expiresAtTurn)) return 0
+    return Math.max(0, expiresAtTurn - placementTurn)
 }
 
 function isBlockOfColor(cellCode, color) {
@@ -350,12 +399,13 @@ function canPlacePairAt(y, col, offset, pair=activePair) {
         const firstRow = Math.floor(segmentY / cellH)
         const lastRow = Math.floor((segmentY + cellH - 0.001) / cellH)
 
-        if (segmentCol < 0 || segmentCol >= blocks[0].length || firstRow < 0 || lastRow >= blocks.length) {
+        if (segmentCol < 0 || segmentCol >= blocks[0].length || lastRow >= essen.ratioh) {
             return false
         }
 
-        for (let row = firstRow; row <= lastRow; row++) {
-            if (blocks[row][segmentCol] !== 0) return false
+        for (let row = Math.max(firstRow, -hiddenTopRows); row <= lastRow; row++) {
+            const storageRow = row + hiddenTopRows
+            if (blocks[storageRow][segmentCol] !== 0) return false
         }
     }
 
@@ -573,7 +623,7 @@ function findTriggeredWaves() {
     for (let row = 0; row < blocks.length; row++) {
         for (let col = 0; col < blocks[row].length; col++) {
             const cellCode = blocks[row][col]
-            if (cellCode <= colorCount) continue
+            if (!isTriggerBlockCode(cellCode)) continue
 
             const triggerColor = cellCode - colorCount
             const layers = findExplosionLayers(row, col, triggerColor)
@@ -584,6 +634,25 @@ function findTriggeredWaves() {
                 for (const [groupRow, groupCol] of layers[waveIndex]) {
                     addCell(groupRow, groupCol, waveIndex)
                 }
+            }
+        }
+    }
+
+    for (const [key, waveIndex] of [...waveByCell]) {
+        const [row, col] = key.split(',').map(Number)
+        const isExplodingColorBlock =
+            blocks[row][col] >= 1 && blocks[row][col] <= colorCount * 2
+        if (!isExplodingColorBlock) continue
+
+        for (const [rowOffset, colOffset] of neighborOffsets) {
+            const garbageRow = row + rowOffset
+            const garbageCol = col + colOffset
+            if (
+                garbageRow >= 0 && garbageRow < blocks.length &&
+                garbageCol >= 0 && garbageCol < blocks[garbageRow].length &&
+                blocks[garbageRow][garbageCol] === garbageBlockCode
+            ) {
+                addCell(garbageRow, garbageCol, waveIndex)
             }
         }
     }
@@ -953,7 +1022,7 @@ function drawShapeFlashes(timestamp, cellW, cellH) {
         if (opacity <= 0) return true
 
         const centerX = essen.boardX + animation.center.col * cellW + cellW / 2
-        const centerY = essen.boardY + animation.center.row * cellH + cellH / 2
+        const centerY = essen.boardY + (animation.center.row - hiddenTopRows) * cellH + cellH / 2
         ctx.save()
         ctx.globalAlpha = opacity
         ctx.strokeStyle = 'white'
@@ -965,7 +1034,7 @@ function drawShapeFlashes(timestamp, cellW, cellH) {
         ctx.beginPath()
         for (const arm of animation.arms) {
             const armX = essen.boardX + arm.col * cellW + cellW / 2
-            const armY = essen.boardY + arm.row * cellH + cellH / 2
+            const armY = essen.boardY + (arm.row - hiddenTopRows) * cellH + cellH / 2
             ctx.moveTo(centerX, centerY)
             ctx.lineTo(armX, armY)
         }
@@ -1004,6 +1073,7 @@ function awardExplosionScore(recentCells=[]) {
 function settleGravity() {
     // Compute each column's final stack in one pass; animation covers the full distance.
     const nextBlocks = Array.from({length:blocks.length},()=>Array(blocks[0].length).fill(0))
+    const nextTriggerExpiresAtTurn = Array.from({length:blocks.length},()=>Array(blocks[0].length).fill(null))
     const motions = []
 
     for (let col = 0; col < blocks[0].length; col++) {
@@ -1026,6 +1096,7 @@ function settleGravity() {
                 const toRow = fromRow + fallDistance
                 const code = blocks[fromRow][col]
                 nextBlocks[toRow][col] = code
+                nextTriggerExpiresAtTurn[toRow][col] = triggerExpiresAtTurn[fromRow][col]
                 if (fallDistance > 0) {
                     motions.push({fromRow, toRow, col, code})
                 }
@@ -1036,6 +1107,7 @@ function settleGravity() {
     }
 
     blocks = nextBlocks
+    triggerExpiresAtTurn = nextTriggerExpiresAtTurn
     return motions
 }
 
@@ -1059,6 +1131,7 @@ function startGravityAnimation(motions, onComplete) {
 }
 
 function startLandingBounce(row, col, code, timestamp=performance.now()) {
+    if (row < hiddenTopRows) return
     landingAnimations.set(`${row},${col}`, {code,startTime:timestamp})
 }
 
@@ -1094,7 +1167,9 @@ function updateGravityAnimations(timestamp) {
     fallAnimations = fallAnimations.filter(animation => timestamp < animation.startTime + animation.duration)
     if (completedAnimations.length > 0) playPlaceBlockSound()
     for (const animation of completedAnimations) {
-        startLandingBounce(animation.toRow, animation.col, animation.code, timestamp)
+        if (animation.toRow >= hiddenTopRows) {
+            startLandingBounce(animation.toRow, animation.col, animation.code, timestamp)
+        }
     }
     if (fallAnimations.length === 0 && gravityAnimationComplete) {
         const onComplete = gravityAnimationComplete
@@ -1147,6 +1222,7 @@ function resolveExplosions(onComplete) {
                     spawnScoreParticle(row, col, blocks[row][col])
                 }
                 blocks[row][col] = 0
+                triggerExpiresAtTurn[row][col] = null
             }
             layerIndex++
 
@@ -1166,8 +1242,12 @@ function resolveExplosions(onComplete) {
 
 function placeBlocks(cells, stationaryLandingCells=[]) {
     // Write every cell first so a future pair is resolved as one placement.
+    advancePlacementTurn()
     for (const {row, col, type} of cells) {
         blocks[row][col] = type
+        triggerExpiresAtTurn[row][col] = isTriggerBlockCode(type)
+            ? placementTurn + triggerGarbageTurnLimit
+            : null
     }
     pendingShapeCells = cells.map(cell => ({...cell}))
     if (stationaryLandingCells.length > 0) playPlaceBlockSound()
@@ -1175,8 +1255,83 @@ function placeBlocks(cells, stationaryLandingCells=[]) {
         startLandingBounce(row, col, type)
     }
     resolveExplosions(() => {
-        if (!gameOver) nextSpawnAt = performance.now() + spawnDelay
+        if (activePair && activePair.dropped) activePair = null
+        if (pendingIncomingGarbage > 0 && !gameOver) {
+            dropPendingGarbage()
+        } else if (!gameOver) {
+            nextSpawnAt = performance.now() + spawnDelay
+        }
     })
+}
+
+function dropPendingGarbage() {
+    if (
+        pendingIncomingGarbage <= 0 || gameOver || isResolving ||
+        (activePair && !activePair.dropped)
+    ) return 0
+
+    const requestedCount = pendingIncomingGarbage
+    pendingIncomingGarbage = 0
+    nextSpawnAt = null
+    const columnHeights = Array(blocks[0].length).fill(0)
+    for (let row = 0; row < blocks.length; row++) {
+        for (let col = 0; col < blocks[row].length; col++) {
+            if (blocks[row][col] !== 0) columnHeights[col] += 1
+        }
+    }
+
+    const motions = []
+    for (let index = 0; index < requestedCount; index++) {
+        let selectedColumn = -1
+        let shortestHeight = blocks.length
+        for (let offset = 0; offset < blocks[0].length; offset++) {
+            const col = (garbageColumnCursor + offset) % blocks[0].length
+            if (columnHeights[col] < shortestHeight) {
+                selectedColumn = col
+                shortestHeight = columnHeights[col]
+            }
+        }
+
+        if (selectedColumn < 0) {
+            gameOver = true
+            break
+        }
+
+        const row = blocks.length - 1 - columnHeights[selectedColumn]
+        blocks[row][selectedColumn] = garbageBlockCode
+        triggerExpiresAtTurn[row][selectedColumn] = null
+        motions.push({fromRow:Math.min(hiddenTopRows - 1, row - 1),toRow:row,col:selectedColumn,code:garbageBlockCode})
+        columnHeights[selectedColumn] += 1
+        garbageColumnCursor = (selectedColumn + 1) % blocks[0].length
+    }
+
+    function finishGarbageDrop() {
+        isResolving = false
+        if (pendingIncomingGarbage > 0 && !gameOver) {
+            dropPendingGarbage()
+        } else if (!gameOver && !activePair) {
+            nextSpawnAt = performance.now() + spawnDelay
+        }
+    }
+
+    startGravityAnimation(motions, finishGarbageDrop)
+    return motions.length
+}
+
+export function receiveOpponentScore(opponentScore) {
+    if (typeof opponentScore !== 'number' || !Number.isFinite(opponentScore) || opponentScore <= 0 || gameOver) {
+        return 0
+    }
+
+    const garbageCount = Math.floor(opponentScore)
+    if (garbageCount <= 0) return 0
+
+    pendingIncomingGarbage += garbageCount
+    if (!isResolving && (!activePair || activePair.dropped)) {
+        if (activePair && activePair.dropped) activePair = null
+        dropPendingGarbage()
+    }
+    return garbageCount
 }
 
 function findLandingRow(nextY) {
@@ -1194,12 +1349,14 @@ function findLandingRow(nextY) {
     }
 
     let landingRow = Math.round(low / (essen.khungh / essen.ratioh))
-    while (landingRow >= 0 && !canPlacePairAt(
+    let rowSearches = 0
+    while (rowSearches < blocks.length + hiddenTopRows + 2 && !canPlacePairAt(
         landingRow * (essen.khungh / essen.ratioh),
         activePair.col,
         activePair.offset
     )) {
         landingRow--
+        rowSearches++
     }
     return landingRow
 }
@@ -1209,13 +1366,17 @@ function getProjectedPairSegments(landingRow) {
     const projectedBoard = blocks.map(row => [...row])
     const previewMarkers = segments.map((segment, index) => ({
         previewIndex:index,
-        row:landingRow + segment.row,
+        row:hiddenTopRows + landingRow + segment.row,
         col:activePair.col + segment.col,
         color:segment.color
     }))
     const projectedPositions = Array(segments.length)
 
     for (const marker of previewMarkers) {
+        if (
+            marker.row < 0 || marker.row >= projectedBoard.length ||
+            marker.col < 0 || marker.col >= projectedBoard[marker.row].length
+        ) continue
         projectedBoard[marker.row][marker.col] = marker
     }
 
@@ -1257,11 +1418,23 @@ function loop(timestamp) {
     ctx.restore()
 }
 
+function drawLossZoneMarker(cellW, cellH) {
+    const centerCol = Math.floor(essen.ratiow / 2)
+    drawLossZoneX(
+        essen.boardX + centerCol * cellW,
+        essen.boardY,
+        cellW,
+        cellH,
+        0.4
+    )
+}
+
 function render(timestamp, deltaSeconds) {
     updateGravityAnimations(timestamp)
     khung()
     const cellW = essen.khungw / essen.ratiow
     const cellH = essen.khungh / essen.ratioh
+    drawLossZoneMarker(cellW, cellH)
     const centerCol = Math.floor(essen.ratiow / 2)
     const animatedDestinations = new Set(
         fallAnimations.map(animation => `${animation.toRow},${animation.col}`)
@@ -1269,11 +1442,14 @@ function render(timestamp, deltaSeconds) {
 
     for (let row = 0; row < blocks.length; row++) {
         for (let col = 0; col < blocks[row].length; col++) {
-            if (blocks[row][col] !== 0 && !animatedDestinations.has(`${row},${col}`)) {
+            if (
+                row >= hiddenTopRows && blocks[row][col] !== 0 &&
+                !animatedDestinations.has(`${row},${col}`)
+            ) {
                 const bounce = getLandingBounceScale(row, col, timestamp)
                 block(
                     (col - centerCol) * cellW,
-                    row * cellH,
+                    (row - hiddenTopRows) * cellH,
                     blocks[row][col],
                     bounce.scaleX,
                     bounce.scaleY
@@ -1285,7 +1461,11 @@ function render(timestamp, deltaSeconds) {
     for (const animation of fallAnimations) {
         const progress = Math.min(1, (timestamp - animation.startTime) / animation.duration)
         const currentRow = animation.fromRow + (animation.toRow - animation.fromRow) * progress
-        block((animation.col - centerCol) * cellW, currentRow * cellH, animation.code)
+        block(
+            (animation.col - centerCol) * cellW,
+            (currentRow - hiddenTopRows) * cellH,
+            animation.code
+        )
     }
 
     sidePanel(score, getUpcomingPairs())
@@ -1314,34 +1494,37 @@ function render(timestamp, deltaSeconds) {
 
         if (landingRow === null) {
             activePair.y = nextY
-        } else if (landingRow < 0) {
-            gameOver = true
         } else {
-            activePair.y = landingRow * cellH
-            activePair.dropped = true
-            pairMotion = null
             const pairCells = pairSegments(activePair).map(segment => ({
-                row:landingRow + segment.row,
+                row:hiddenTopRows + landingRow + segment.row,
                 col:activePair.col + segment.col,
                 type:blockCode(segment.color, activePair.trigger)
             }))
-            const projectedSegments = getProjectedPairSegments(landingRow)
-            const stationaryLandingCells = projectedSegments.flatMap((segment, index) => {
-                const placedCell = pairCells[index]
-                if (segment.row !== placedCell.row || segment.col !== placedCell.col) return []
-                return [{row:segment.row,col:segment.col,type:placedCell.type}]
-            })
-            placeBlocks(pairCells, stationaryLandingCells)
+            if (pairCells.some(cell => cell.row < 0 || cell.row >= blocks.length)) {
+                gameOver = true
+            } else {
+                activePair.y = landingRow * cellH
+                activePair.dropped = true
+                pairMotion = null
+                const projectedSegments = getProjectedPairSegments(landingRow)
+                const stationaryLandingCells = projectedSegments.flatMap((segment, index) => {
+                    const placedCell = pairCells[index]
+                    if (segment.row !== placedCell.row || segment.col !== placedCell.col) return []
+                    return [{row:segment.row,col:segment.col,type:placedCell.type}]
+                })
+                placeBlocks(pairCells, stationaryLandingCells)
+            }
         }
     }
 
     if (activePair && !activePair.dropped && !gameOver) {
-        const landingRow = findLandingRow((blocks.length + 1) * cellH)
-        if (landingRow !== null && landingRow >= 0) {
+        const landingRow = findLandingRow((essen.ratioh + 1) * cellH)
+        if (landingRow !== null && landingRow >= -hiddenTopRows) {
             for (const segment of getProjectedPairSegments(landingRow)) {
+                if (!segment || segment.row < hiddenTopRows || segment.row >= blocks.length) continue
                 block(
                     (segment.col - centerCol) * cellW,
-                    segment.row * cellH,
+                    (segment.row - hiddenTopRows) * cellH,
                     blockCode(segment.color, activePair.trigger),
                     1,
                     1,

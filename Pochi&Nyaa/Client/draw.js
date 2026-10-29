@@ -147,7 +147,7 @@ function drawCatHead(x, y, size, palette) {
     const tileX = x + inset
     const tileY = y + inset
     const tileSize = size - inset * 2
-    const tileRadius = tileSize * 0.12
+    const tileRadius = tileSize * 0.3
 
     ctx.save()
     ctx.shadowColor = 'rgba(76, 61, 39, 0.16)'
@@ -176,21 +176,28 @@ function drawCatHead(x, y, size, palette) {
     ctx.stroke()
     ctx.restore()
 
-    const innerInset = borderWidth * 0.45
-    const innerGradient = ctx.createLinearGradient(tileX, tileY, tileX + tileSize, tileY + tileSize)
-    innerGradient.addColorStop(0, 'rgba(8, 7, 6, 0.2)')
-    innerGradient.addColorStop(0.5, 'rgba(8, 7, 6, 0.1)')
-    innerGradient.addColorStop(1, 'rgba(8, 7, 6, 0.16)')
-    roundedRectPath(
-        tileX + innerInset,
-        tileY + innerInset,
-        tileSize - innerInset * 2,
-        tileSize - innerInset * 2,
-        Math.max(0, tileRadius - innerInset)
-    )
-    ctx.strokeStyle = innerGradient
-    ctx.lineWidth = Math.max(0.45, size * 0.009)
-    ctx.stroke()
+    const inwardFadeBands = [
+        {offset:size * 0.012, width:size * 0.028, alpha:0.32},
+        {offset:size * 0.034, width:size * 0.026, alpha:0.18},
+        {offset:size * 0.056, width:size * 0.024, alpha:0.09}
+    ]
+    for (const band of inwardFadeBands) {
+        const inset = borderWidth * 0.5 + band.offset + band.width * 0.5
+        const inwardGradient = ctx.createLinearGradient(tileX, tileY, tileX + tileSize, tileY + tileSize)
+        inwardGradient.addColorStop(0, `rgba(5, 4, 3, ${band.alpha})`)
+        inwardGradient.addColorStop(0.5, `rgba(5, 4, 3, ${band.alpha * 0.7})`)
+        inwardGradient.addColorStop(1, `rgba(5, 4, 3, ${band.alpha})`)
+        roundedRectPath(
+            tileX + inset,
+            tileY + inset,
+            tileSize - inset * 2,
+            tileSize - inset * 2,
+            Math.max(0, tileRadius - inset)
+        )
+        ctx.strokeStyle = inwardGradient
+        ctx.lineWidth = band.width
+        ctx.stroke()
+    }
 
     const cx = tileX + tileSize / 2
     const cy = tileY + tileSize * 0.53
@@ -303,6 +310,83 @@ function drawTriggerCat(x, y, size, palette) {
     ctx.restore()
 }
 
+function drawGarbageBlock(x, y, width, height) {
+    const size = Math.min(width, height)
+    const left = x + (width - size) / 2 + size * 0.035
+    const top = y + (height - size) / 2 + size * 0.035
+    const tileSize = size * 0.93
+    const radius = tileSize * 0.11
+    const fill = ctx.createLinearGradient(left, top, left + tileSize, top + tileSize)
+    fill.addColorStop(0, '#ffffff')
+    fill.addColorStop(0.5, '#f0f1ef')
+    fill.addColorStop(1, '#d6d9d5')
+
+    ctx.save()
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.24)'
+    ctx.shadowBlur = size * 0.025
+    roundedRectPath(left, top, tileSize, tileSize, radius)
+    ctx.fillStyle = fill
+    ctx.fill()
+    ctx.shadowBlur = 0
+
+    const outline = ctx.createLinearGradient(left, top, left + tileSize, top + tileSize)
+    outline.addColorStop(0, '#5e625e')
+    outline.addColorStop(0.5, '#2b2e2b')
+    outline.addColorStop(1, '#4b4f4b')
+    roundedRectPath(left, top, tileSize, tileSize, radius)
+    ctx.strokeStyle = outline
+    ctx.lineWidth = Math.max(1, size * 0.045)
+    ctx.stroke()
+
+    const centerX = left + tileSize * 0.52
+    const centerY = top + tileSize * 0.52
+    ctx.beginPath()
+    ctx.moveTo(centerX - tileSize * 0.19, centerY - tileSize * 0.24)
+    ctx.lineTo(centerX - tileSize * 0.04, centerY - tileSize * 0.06)
+    ctx.lineTo(centerX - tileSize * 0.12, centerY + tileSize * 0.08)
+    ctx.lineTo(centerX + tileSize * 0.06, centerY + tileSize * 0.13)
+    ctx.lineTo(centerX + tileSize * 0.17, centerY + tileSize * 0.29)
+    ctx.strokeStyle = 'rgba(86, 91, 86, 0.72)'
+    ctx.lineWidth = Math.max(0.8, size * 0.025)
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    ctx.stroke()
+
+    ctx.beginPath()
+    ctx.arc(left + tileSize * 0.72, top + tileSize * 0.28, size * 0.025, 0, Math.PI * 2)
+    ctx.arc(left + tileSize * 0.29, top + tileSize * 0.7, size * 0.018, 0, Math.PI * 2)
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.78)'
+    ctx.fill()
+    ctx.restore()
+}
+
+export function drawLossZoneX(x, y, width, height, opacity=0.4) {
+    const size = Math.min(width, height) * 0.82
+    const cx = x + width / 2
+    const cy = y + height / 2
+
+    ctx.save()
+    ctx.globalAlpha *= opacity
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    ctx.shadowColor = 'rgba(255, 25, 35, 0.95)'
+    ctx.shadowBlur = size * 0.36
+
+    for (const [xDirection, yDirection] of [[-1, -1], [1, -1]]) {
+        ctx.beginPath()
+        ctx.moveTo(cx + xDirection * size * 0.32, cy + yDirection * size * 0.32)
+        ctx.lineTo(cx - xDirection * size * 0.32, cy - yDirection * size * 0.32)
+        ctx.strokeStyle = '#a8121c'
+        ctx.lineWidth = Math.max(3, size * 0.15)
+        ctx.stroke()
+
+        ctx.strokeStyle = '#ff303b'
+        ctx.lineWidth = Math.max(1.8, size * 0.085)
+        ctx.stroke()
+    }
+    ctx.restore()
+}
+
 function drawCatSprite(x, y, width, height, color, isTrigger=false) {
     const size = Math.min(width, height)
     const palette = catPalettes[color - 1] || catPalettes[0]
@@ -315,7 +399,8 @@ function drawCatSprite(x, y, width, height, color, isTrigger=false) {
 
 // Optional scale values let landing feedback squash or stretch this sprite later.
 export function block(x,y,type=1,scaleX=1,scaleY=1,opacity=1) {
-    const isTrigger = type > catPalettes.length
+    const isGarbage = type === catPalettes.length * 2 + 1
+    const isTrigger = type > catPalettes.length && !isGarbage
     const color = isTrigger ? type - catPalettes.length : type
     const centerCol = Math.floor(essen.ratiow / 2)
     const blockX = essen.boardX+khungw/essen.ratiow*centerCol+x
@@ -328,14 +413,18 @@ export function block(x,y,type=1,scaleX=1,scaleY=1,opacity=1) {
     ctx.translate(blockX + blockW / 2, blockY + blockH / 2)
     ctx.scale(scaleX, scaleY)
     ctx.globalAlpha *= Math.max(0, Math.min(1, opacity))
-    drawCatSprite(
-        -blockW / 2 + inset,
-        -blockH / 2 + inset,
-        blockW - inset * 2,
-        blockH - inset * 2,
-        color,
-        isTrigger
-    )
+    if (isGarbage) {
+        drawGarbageBlock(-blockW / 2 + inset, -blockH / 2 + inset, blockW - inset * 2, blockH - inset * 2)
+    } else {
+        drawCatSprite(
+            -blockW / 2 + inset,
+            -blockH / 2 + inset,
+            blockW - inset * 2,
+            blockH - inset * 2,
+            color,
+            isTrigger
+        )
+    }
     ctx.restore()
 }
 
